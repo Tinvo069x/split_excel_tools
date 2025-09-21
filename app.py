@@ -67,7 +67,7 @@ def split_excel_with_format(input_file, sheet_name, header_row, selected_cols):
     return zip_buffer
 
 # ===================== Streamlit UI =====================
-st.title("📊 Split Excel giữ nguyên công thức & format")
+st.title("📊 Split Excel xlsx, xlsm-Tins")
 
 uploaded_file = st.file_uploader("Upload Excel file", type=["xlsx","xlsm"])
 
