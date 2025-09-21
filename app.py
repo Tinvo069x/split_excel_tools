@@ -3,30 +3,32 @@ import pandas as pd
 import io, zipfile
 from datetime import datetime
 from pathlib import Path
+from openpyxl import load_workbook, Workbook
+from copy import copy
 
-# ===================== Helpers =====================
-def read_excel_safely(uploaded_file, sheet_name, header_row):
-    """Đọc Excel an toàn theo đuôi file, hỗ trợ cả .xlsb"""
-    suffix = Path(uploaded_file.name).suffix.lower()
+def copy_row_with_format(src_ws, tgt_ws, src_row, tgt_row):
+    """Copy nguyên giá trị, công thức, format từ 1 row sang row mới"""
+    for col, cell in enumerate(src_ws[src_row], start=1):
+        new_cell = tgt_ws.cell(row=tgt_row, column=col, value=cell.value)
+        if cell.has_style:
+            new_cell.font = copy(cell.font)
+            new_cell.border = copy(cell.border)
+            new_cell.fill = copy(cell.fill)
+            new_cell.number_format = copy(cell.number_format)
+            new_cell.protection = copy(cell.protection)
+            new_cell.alignment = copy(cell.alignment)
 
-    if suffix == ".xlsb":
-        engine = "pyxlsb"
-    elif suffix in [".xlsx", ".xlsm"]:
-        engine = "openpyxl"
-    elif suffix == ".xls":
-        engine = "xlrd"
-    else:
-        raise ValueError(f"❌ Định dạng {suffix} chưa hỗ trợ")
-
-    return pd.read_excel(uploaded_file, sheet_name=sheet_name, header=header_row-1, dtype=str, engine=engine)
-
-# ===================== Core Function =====================
-def split_excel_by_columns(df, selected_cols):
+def split_excel_with_format(input_file, sheet_name, header_row, selected_cols):
+    # Dùng pandas để group dữ liệu (nhanh)
+    df = pd.read_excel(input_file, sheet_name=sheet_name, header=header_row-1, dtype=str)
     df = df.fillna("")
+
+    # Load workbook bằng openpyxl để copy format
+    wb = load_workbook(input_file, data_only=False)  # data_only=False để giữ công thức
+    ws = wb[sheet_name]
 
     bad_words = ["(All)", "Sum of", "Supplier", "Invoice", "Shipmode"]
 
-    # Tạo buffer zip
     zip_buffer = io.BytesIO()
     with zipfile.ZipFile(zip_buffer, "w") as zf:
         for keys, group in df.groupby(selected_cols):
@@ -41,66 +43,56 @@ def split_excel_by_columns(df, selected_cols):
             for ch in r'\/:*?"<>|':
                 split_key = split_key.replace(ch, "_")
 
-            file_name = f"{split_key}-{datetime.today().strftime('%Y%m%d')}.xlsx"
+            # Tạo workbook mới
+            new_wb = Workbook()
+            new_ws = new_wb.active
 
-            # Save group vào memory
+            # Copy header block
+            for r in range(1, header_row+1):
+                copy_row_with_format(ws, new_ws, r, r)
+
+            # Copy từng dòng dữ liệu tương ứng
+            paste_row = header_row + 1
+            for _, row in group.iterrows():
+                excel_row_idx = row.name + header_row + 1  # index pandas + offset
+                copy_row_with_format(ws, new_ws, excel_row_idx, paste_row)
+                paste_row += 1
+
+            # Lưu vào memory
             output = io.BytesIO()
-            group.to_excel(output, index=False)
+            file_name = f"{split_key}-{datetime.today().strftime('%Y%m%d')}.xlsx"
+            new_wb.save(output)
             zf.writestr(file_name, output.getvalue())
 
     return zip_buffer
 
 # ===================== Streamlit UI =====================
-st.title("📊 Split Excel by Multi Columns (Support .xlsb)")
+st.title("📊 Split Excel giữ nguyên công thức & format")
 
-uploaded_file = st.file_uploader("Upload Excel file", type=["xlsx", "xls", "xlsm", "xlsb"])
+uploaded_file = st.file_uploader("Upload Excel file", type=["xlsx","xlsm"])
 
 if uploaded_file:
-    # Lấy danh sách sheet
-    try:
-        suffix = Path(uploaded_file.name).suffix.lower()
-        if suffix == ".xlsb":
-            xls = pd.ExcelFile(uploaded_file, engine="pyxlsb")
-        elif suffix in [".xlsx", ".xlsm"]:
-            xls = pd.ExcelFile(uploaded_file, engine="openpyxl")
-        elif suffix == ".xls":
-            xls = pd.ExcelFile(uploaded_file, engine="xlrd")
+    xls = pd.ExcelFile(uploaded_file, engine="openpyxl")
+    sheet_name = st.selectbox("Chọn sheet:", xls.sheet_names)
+    header_row = st.number_input("Chọn dòng header", min_value=1, value=1, step=1)
+
+    if st.button("🔍 Xem trước"):
+        df_preview = pd.read_excel(uploaded_file, sheet_name=sheet_name, header=header_row-1, nrows=10)
+        st.dataframe(df_preview)
+
+    df = pd.read_excel(uploaded_file, sheet_name=sheet_name, header=header_row-1, dtype=str)
+    selected_cols = st.multiselect("Chọn cột để split:", df.columns.tolist())
+
+    if st.button("🚀 Split Now"):
+        if not selected_cols:
+            st.warning("⚠️ Vui lòng chọn ít nhất 1 cột")
         else:
-            raise ValueError("❌ Định dạng file không hỗ trợ")
+            zip_buffer = split_excel_with_format(uploaded_file, sheet_name, header_row, selected_cols)
+            st.success("✅ Đã tách file, giữ nguyên công thức và định dạng!")
 
-        sheet_name = st.selectbox("Chọn sheet:", xls.sheet_names)
-
-        # Nhập dòng header
-        header_row = st.number_input("Chọn dòng header (ví dụ: 1,2,3...)", min_value=1, value=1, step=1)
-
-        if st.button("🔍 Xem trước dữ liệu"):
-            try:
-                df_preview = read_excel_safely(uploaded_file, sheet_name, header_row).head(10)
-                st.dataframe(df_preview)
-            except Exception as e:
-                st.error(f"Lỗi khi đọc file: {e}")
-
-        try:
-            df = read_excel_safely(uploaded_file, sheet_name, header_row)
-
-            # Multi-select để chọn cột split
-            selected_cols = st.multiselect("Chọn các cột để tách file:", df.columns.tolist())
-
-            if st.button("🚀 Split Now"):
-                if not selected_cols:
-                    st.warning("⚠️ Vui lòng chọn ít nhất 1 cột để split")
-                else:
-                    zip_buffer = split_excel_by_columns(df, selected_cols)
-                    st.success("✅ Đã tách file thành công!")
-
-                    st.download_button(
-                        label="📥 Download ZIP",
-                        data=zip_buffer.getvalue(),
-                        file_name=f"SplitResult-{datetime.today().strftime('%Y%m%d')}.zip",
-                        mime="application/zip"
-                    )
-        except Exception as e:
-            st.error(f"❌ Lỗi khi xử lý: {e}")
-
-    except Exception as e:
-        st.error(f"❌ Lỗi khi load sheet: {e}")
+            st.download_button(
+                label="📥 Download ZIP",
+                data=zip_buffer.getvalue(),
+                file_name=f"SplitResult-{datetime.today().strftime('%Y%m%d')}.zip",
+                mime="application/zip"
+            )
